@@ -14,12 +14,9 @@ import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { getNetworkMode, getNodeName } from '../../shared/node-identity.js';
 
-function getDashboardUrl(port: number, settings: ReturnType<typeof SettingsDefaultsManager.loadFromFile>): string {
-  const mode = getNetworkMode();
-  if (mode === 'client') {
-    // In client mode, the proxy runs locally and forwards the viewer UI
-    return `http://localhost:${port}`;
-  }
+function getDashboardUrl(port: number, _settings: ReturnType<typeof SettingsDefaultsManager.loadFromFile>): string {
+  // Always return the local proxy/worker URL — in client mode the proxy
+  // forwards the viewer UI, so localhost is correct for all modes.
   return `http://localhost:${port}`;
 }
 
