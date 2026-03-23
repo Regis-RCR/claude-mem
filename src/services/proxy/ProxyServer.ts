@@ -140,7 +140,13 @@ export class ProxyServer {
   private startHealthCheck(): void {
     this.healthCheckInterval = setInterval(async () => {
       try {
-        const resp = await fetch(`http://${this.serverHost}:${this.serverPort}/api/health`);
+        const healthHeaders: Record<string, string> = {};
+        if (this.authToken) {
+          healthHeaders['Authorization'] = `Bearer ${this.authToken}`;
+        }
+        const resp = await fetch(`http://${this.serverHost}:${this.serverPort}/api/health`, {
+          headers: healthHeaders,
+        });
         const wasUnreachable = !this.serverReachable;
         this.serverReachable = resp.ok;
 
