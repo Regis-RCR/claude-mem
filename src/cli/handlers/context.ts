@@ -12,6 +12,30 @@ import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { logger } from '../../utils/logger.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+import { getNetworkMode, getNodeName } from '../../shared/node-identity.js';
+
+function getDashboardUrl(port: number, settings: ReturnType<typeof SettingsDefaultsManager.loadFromFile>): string {
+  const mode = getNetworkMode();
+  if (mode === 'client') {
+    const serverHost = settings.CLAUDE_MEM_SERVER_HOST;
+    const serverPort = settings.CLAUDE_MEM_SERVER_PORT || String(port);
+    return `http://${serverHost}:${serverPort}`;
+  }
+  return `http://localhost:${port}`;
+}
+
+function getNetworkStatusLine(port: number, settings: ReturnType<typeof SettingsDefaultsManager.loadFromFile>): string {
+  const mode = getNetworkMode();
+  if (mode === 'standalone') return '';
+  if (mode === 'server') {
+    const nodeName = getNodeName();
+    return `\n  Mode: server | Node: ${nodeName}\n  Remote: http://${nodeName}:${port}`;
+  }
+  if (mode === 'client') {
+    return `\n  Mode: client → ${settings.CLAUDE_MEM_SERVER_HOST} | Node: ${getNodeName()}`;
+  }
+  return '';
+}
 
 export const contextHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -67,8 +91,10 @@ export const contextHandler: EventHandler = {
       const additionalContext = contextResult.trim();
       const coloredTimeline = colorResult.trim();
 
+      const dashboardUrl = getDashboardUrl(port, settings);
+      const networkStatus = getNetworkStatusLine(port, settings);
       const systemMessage = showTerminalOutput && coloredTimeline
-        ? `${coloredTimeline}\n\nView Observations Live @ http://localhost:${port}`
+        ? `${coloredTimeline}\n\nView Observations Live @ ${dashboardUrl}${networkStatus}`
         : undefined;
 
       return {
