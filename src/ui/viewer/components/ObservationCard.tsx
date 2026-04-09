@@ -55,6 +55,11 @@ export function ObservationCard({ observation }: ObservationCardProps) {
           <span className={`card-source source-${observation.platform_source || 'claude'}`}>
             {observation.platform_source || 'claude'}
           </span>
+          {observation.llm_source && (
+            <span className="card-source" style={{ opacity: 0.7, fontSize: '0.75em' }}>
+              {observation.llm_source}
+            </span>
+          )}
           <span className="card-project">{observation.project}</span>
         </div>
         <div className="view-mode-toggles">

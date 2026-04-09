@@ -15,6 +15,11 @@ export interface Observation {
   prompt_number: number | null;
   created_at: string;
   created_at_epoch: number;
+  // Provenance fields (nullable)
+  node?: string | null;
+  platform?: string | null;
+  instance?: string | null;
+  llm_source?: string | null;
 }
 
 export interface Summary {
@@ -28,6 +33,11 @@ export interface Summary {
   completed?: string;
   next_steps?: string;
   created_at_epoch: number;
+  // Provenance fields (nullable)
+  node?: string | null;
+  platform?: string | null;
+  instance?: string | null;
+  llm_source?: string | null;
 }
 
 export interface UserPrompt {

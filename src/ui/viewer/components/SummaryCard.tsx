@@ -24,6 +24,11 @@ export function SummaryCard({ summary }: SummaryCardProps) {
           <span className={`card-source source-${summary.platform_source || 'claude'}`}>
             {summary.platform_source || 'claude'}
           </span>
+          {summary.llm_source && (
+            <span className="card-source" style={{ opacity: 0.7, fontSize: '0.75em' }}>
+              {summary.llm_source}
+            </span>
+          )}
           <span className="summary-project-badge">{summary.project}</span>
         </div>
         {summary.request && (
