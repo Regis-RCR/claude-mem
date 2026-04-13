@@ -26,8 +26,7 @@ and updated the documentation to reflect the new scoring mechanism.
 
     const results = parseObservations(raw);
     expect(results.length).toBe(1);
-    expect(results[0].title!.length).toBeLessThanOrEqual(120);
-    expect(results[0].title!.endsWith('...')).toBe(true);
+    expect(results[0].title).toBe(`${'A'.repeat(117)}...`);
     expect(results[0].narrative).toContain(longLine);
   });
 
