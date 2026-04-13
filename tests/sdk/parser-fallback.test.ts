@@ -81,4 +81,18 @@ and updated the documentation to reflect the new scoring mechanism.
     expect(results[0].title).toBeNull();
     expect(results[0].narrative).toBeNull();
   });
+
+  it('triggers fallback when prose contains XML-like literals without closing tags', () => {
+    // Plain text mentioning <type> and <title> as literals — not real tag pairs
+    const raw = `<observation>
+The model mentioned <type> and <title> in its response but never closed them properly.
+This should be treated as unstructured text.
+</observation>`;
+
+    const results = parseObservations(raw);
+    expect(results.length).toBe(1);
+    // No real open+close tag pairs → fallback should fire
+    expect(results[0].title).toContain('The model mentioned');
+    expect(results[0].narrative).toContain('unstructured text');
+  });
 });

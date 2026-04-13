@@ -76,7 +76,7 @@ export function parseObservations(text: string, correlationId?: string): ParsedO
     let finalTitle = title;
     let finalNarrative = narrative;
     if (!title && !narrative && obsContent.trim().length > 0) {
-      const hasAnyXmlTag = /<(type|title|subtitle|narrative|facts|concepts|files_read|files_modified)>/.test(obsContent);
+      const hasAnyXmlTag = /<(type|title|subtitle|narrative|facts|concepts|files_read|files_modified)>[\s\S]*?<\/\1>/.test(obsContent);
       if (!hasAnyXmlTag) {
         const rawText = obsContent.trim();
         // Use first line (up to 120 chars) as title, full text as narrative
@@ -84,7 +84,7 @@ export function parseObservations(text: string, correlationId?: string): ParsedO
         finalTitle = firstLine.length > 120 ? firstLine.slice(0, 117) + '...' : firstLine;
         finalNarrative = rawText;
         logger.warn('PARSER', 'Observation had no XML sub-tags, salvaged raw text as narrative', {
-          correlationId, chars: rawText.length, titlePreview: finalTitle.slice(0, 60),
+          correlationId, chars: rawText.length,
         });
       }
     }
