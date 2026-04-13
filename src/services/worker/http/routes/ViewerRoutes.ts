@@ -10,10 +10,12 @@ import path from 'path';
 import { readFileSync, existsSync } from 'fs';
 import { logger } from '../../../../utils/logger.js';
 import { getPackageRoot } from '../../../../shared/paths.js';
+import { getNetworkMode } from '../../../../shared/node-identity.js';
 import { SSEBroadcaster } from '../../SSEBroadcaster.js';
 import { DatabaseManager } from '../../DatabaseManager.js';
 import { SessionManager } from '../../SessionManager.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
+import { clientRegistry } from '../../../server/ClientRegistry.js';
 
 export class ViewerRoutes extends BaseRouteHandler {
   constructor(
@@ -32,13 +34,14 @@ export class ViewerRoutes extends BaseRouteHandler {
     app.get('/health', this.handleHealth.bind(this));
     app.get('/', this.handleViewerUI.bind(this));
     app.get('/stream', this.handleSSEStream.bind(this));
+    app.get('/api/clients', this.handleGetClients.bind(this));
   }
 
   /**
    * Health check endpoint
    */
   private handleHealth = this.wrapHandler((req: Request, res: Response): void => {
-    res.json({ status: 'ok', timestamp: Date.now() });
+    res.json({ status: 'ok', timestamp: Date.now(), mode: getNetworkMode() });
   });
 
   /**
@@ -62,6 +65,13 @@ export class ViewerRoutes extends BaseRouteHandler {
     const html = readFileSync(viewerPath, 'utf-8');
     res.setHeader('Content-Type', 'text/html');
     res.send(html);
+  });
+
+  /**
+   * GET /api/clients — return connected client list from the registry
+   */
+  private handleGetClients = this.wrapHandler((_req: Request, res: Response): void => {
+    res.json({ clients: clientRegistry.getClients() });
   });
 
   /**

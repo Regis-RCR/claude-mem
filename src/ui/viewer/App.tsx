@@ -6,9 +6,11 @@ import { LogsDrawer } from './components/LogsModal';
 import { useSSE } from './hooks/useSSE';
 import { useSettings } from './hooks/useSettings';
 import { useStats } from './hooks/useStats';
+import { useHealth } from './hooks/useHealth';
+import { useClients } from './hooks/useClients';
 import { usePagination } from './hooks/usePagination';
 import { useTheme } from './hooks/useTheme';
-import { Observation, Summary, UserPrompt } from './types';
+import { Observation, Summary, UserPrompt, TrackedClient } from './types';
 import { mergeAndDeduplicateByProject } from './utils/data';
 
 export function App() {
@@ -19,10 +21,23 @@ export function App() {
   const [paginatedObservations, setPaginatedObservations] = useState<Observation[]>([]);
   const [paginatedSummaries, setPaginatedSummaries] = useState<Summary[]>([]);
   const [paginatedPrompts, setPaginatedPrompts] = useState<UserPrompt[]>([]);
+  const [remoteAccessBlocked, setRemoteAccessBlocked] = useState(false);
 
-  const { observations, summaries, prompts, projects, sources, projectsBySource, isProcessing, queueDepth, isConnected } = useSSE();
+  // Detect remote access without proxy (API returns 401)
+  useEffect(() => {
+    const isRemote = !['localhost', '127.0.0.1', '[::1]'].some(h => window.location.hostname.includes(h));
+    if (isRemote) {
+      fetch('/api/health').then(r => {
+        if (r.status === 401) setRemoteAccessBlocked(true);
+      }).catch(() => setRemoteAccessBlocked(true));
+    }
+  }, []);
+
+  const { observations, summaries, prompts, projects, sources, projectsBySource, isProcessing, queueDepth, isConnected, onClientEvent } = useSSE();
   const { settings, saveSettings, isSaving, saveStatus } = useSettings();
   const { stats, refreshStats } = useStats();
+  const { health } = useHealth();
+  const { clients, activeCount, totalCount, handleClientSSE, sseHandlerRegistered } = useClients(health.mode);
   const { preference, resolvedTheme, setThemePreference } = useTheme();
   const pagination = usePagination(currentFilter, currentSource);
 
@@ -45,6 +60,14 @@ export function App() {
       setCurrentFilter('');
     }
   }, [availableProjects, currentFilter]);
+
+  // Wire SSE client events to useClients handler (once)
+  useEffect(() => {
+    if (!sseHandlerRegistered.current) {
+      onClientEvent(handleClientSSE);
+      sseHandlerRegistered.current = true;
+    }
+  }, [onClientEvent, handleClientSSE, sseHandlerRegistered]);
 
   // Merge SSE live data with paginated data, filtering by project when active
   const allObservations = useMemo(() => {
@@ -107,6 +130,33 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentFilter, currentSource]);
 
+  if (remoteAccessBlocked) {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        minHeight: '60vh', padding: '40px', textAlign: 'center', color: 'var(--color-text-primary)'
+      }}>
+        <h2 style={{ marginBottom: '16px' }}>Remote access requires a local proxy</h2>
+        <p style={{ marginBottom: '24px', color: 'var(--color-text-secondary)', maxWidth: '500px' }}>
+          This server requires authentication for API access. Use the local proxy on your machine instead of connecting directly.
+        </p>
+        <a
+          href="http://localhost:37777"
+          style={{
+            padding: '10px 24px', borderRadius: '6px',
+            background: 'var(--color-bg-button)', color: '#fff', textDecoration: 'none',
+            fontWeight: 600
+          }}
+        >
+          Open via local proxy (localhost:37777)
+        </a>
+        <p style={{ marginTop: '16px', fontSize: '12px', color: 'var(--color-text-tertiary)' }}>
+          If the proxy isn't running: <code>bun ~/.claude/plugins/cache/thedotmack/claude-mem/.../scripts/proxy-service.cjs</code>
+        </p>
+      </div>
+    );
+  }
+
   return (
     <>
       <Header
@@ -122,6 +172,13 @@ export function App() {
         themePreference={preference}
         onThemeChange={setThemePreference}
         onContextPreviewToggle={toggleContextPreview}
+        version={stats.worker?.version}
+        mode={health.mode}
+        activeClients={activeCount}
+        totalClients={totalCount}
+        health={health}
+        clients={clients}
+        authToken={settings.CLAUDE_MEM_AUTH_TOKEN}
       />
 
       <Feed

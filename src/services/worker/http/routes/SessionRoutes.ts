@@ -23,6 +23,7 @@ import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsMana
 import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { getProcessBySession, ensureProcessExit } from '../../ProcessRegistry.js';
 import { getProjectName } from '../../../../utils/project-name.js';
+import { getRequestProvenance } from '../middleware.js';
 import { normalizePlatformSource } from '../../../../shared/platform-source.js';
 
 export class SessionRoutes extends BaseRouteHandler {
@@ -339,13 +340,17 @@ export class SessionRoutes extends BaseRouteHandler {
     if (sessionDbId === null) return;
 
     const { userPrompt, promptNumber } = req.body;
+    const prov = getRequestProvenance(req);
+    const llmSource = req.body.llm_source || prov.llmSource || '';
     logger.info('HTTP', 'SessionRoutes: handleSessionInit called', {
       sessionDbId,
       promptNumber,
       has_userPrompt: !!userPrompt
     });
 
-    const session = this.sessionManager.initializeSession(sessionDbId, userPrompt, promptNumber);
+    const session = this.sessionManager.initializeSession(sessionDbId, userPrompt, promptNumber, prov.node || undefined);
+
+    if (llmSource) session.llm_source = llmSource;
 
     // Get the latest user_prompt for this session to sync to Chroma
     const latestPrompt = this.dbManager.getSessionStore().getLatestUserPrompt(session.contentSessionId);
@@ -359,7 +364,11 @@ export class SessionRoutes extends BaseRouteHandler {
         platform_source: latestPrompt.platform_source,
         prompt_number: latestPrompt.prompt_number,
         prompt_text: latestPrompt.prompt_text,
-        created_at_epoch: latestPrompt.created_at_epoch
+        created_at_epoch: latestPrompt.created_at_epoch,
+        node: latestPrompt.node ?? null,
+        platform: latestPrompt.platform ?? null,
+        instance: latestPrompt.instance ?? null,
+        llm_source: latestPrompt.llm_source ?? null
       });
 
       // Sync user prompt to Chroma
@@ -392,6 +401,10 @@ export class SessionRoutes extends BaseRouteHandler {
 
     // Idempotent: ensure generator is running (matches handleObservations / handleSummarize)
     this.ensureGeneratorRunning(sessionDbId, 'init');
+
+    // Set llm_source after ensureGeneratorRunning in case it created the session
+    const initSession = this.sessionManager.getSession(sessionDbId);
+    if (initSession && llmSource) initSession.llm_source = llmSource;
 
     // Broadcast session started event
     this.eventBroadcaster.broadcastSessionStarted(sessionDbId, session.project);
@@ -507,6 +520,8 @@ export class SessionRoutes extends BaseRouteHandler {
   private handleObservationsByClaudeId = this.wrapHandler((req: Request, res: Response): void => {
     const { contentSessionId, tool_name, tool_input, tool_response, cwd } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
+    const prov = getRequestProvenance(req);
+    const llmSource = req.body.llm_source || prov.llmSource || '';
     const project = typeof cwd === 'string' && cwd.trim() ? getProjectName(cwd) : '';
 
     if (!contentSessionId) {
@@ -568,6 +583,16 @@ export class SessionRoutes extends BaseRouteHandler {
         ? stripMemoryTagsFromJson(JSON.stringify(tool_response))
         : '{}';
 
+      // Set provenance on the active session BEFORE queueing so the generator sees it
+      let obsSession = this.sessionManager.getSession(sessionDbId);
+      if (!obsSession) {
+        // Session not in memory (e.g. after worker restart) — initialize with client provenance
+        obsSession = this.sessionManager.initializeSession(sessionDbId, '', promptNumber, prov.node || undefined);
+      }
+      if (prov.node) obsSession.node = prov.node;
+      if (prov.instance) obsSession.instance = prov.instance;
+      if (llmSource) obsSession.llm_source = llmSource;
+
       // Queue observation
       this.sessionManager.queueObservation(sessionDbId, {
         tool_name,
@@ -607,6 +632,8 @@ export class SessionRoutes extends BaseRouteHandler {
   private handleSummarizeByClaudeId = this.wrapHandler((req: Request, res: Response): void => {
     const { contentSessionId, last_assistant_message } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
+    const prov = getRequestProvenance(req);
+    const llmSource = req.body.llm_source || prov.llmSource || '';
 
     if (!contentSessionId) {
       return this.badRequest(res, 'Missing contentSessionId');
@@ -630,6 +657,16 @@ export class SessionRoutes extends BaseRouteHandler {
       res.json({ status: 'skipped', reason: 'private' });
       return;
     }
+
+    // Set provenance on the active session BEFORE queueing so the generator sees it
+    // Recreate session if missing (e.g. after worker restart) — same pattern as observation handler
+    let sumSession = this.sessionManager.getSession(sessionDbId);
+    if (!sumSession) {
+      sumSession = this.sessionManager.initializeSession(sessionDbId, '', promptNumber, prov.node || undefined);
+    }
+    if (prov.node) sumSession.node = prov.node;
+    if (prov.instance) sumSession.instance = prov.instance;
+    if (llmSource) sumSession.llm_source = llmSource;
 
     // Queue summarize
     this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
@@ -657,7 +694,14 @@ export class SessionRoutes extends BaseRouteHandler {
     }
 
     const store = this.dbManager.getSessionStore();
-    const sessionDbId = store.createSDKSession(contentSessionId, '', '');
+    // Read-only lookup — GET must not create DB rows as side-effect
+    const row = store.db.prepare('SELECT id FROM sdk_sessions WHERE content_session_id = ?')
+      .get(contentSessionId) as { id: number } | undefined;
+    if (!row) {
+      res.json({ status: 'not_found', queueLength: 0 });
+      return;
+    }
+    const sessionDbId = row.id;
     const session = this.sessionManager.getSession(sessionDbId);
 
     if (!session) {
@@ -747,13 +791,16 @@ export class SessionRoutes extends BaseRouteHandler {
     const prompt = req.body.prompt || '[media prompt]';
     const platformSource = normalizePlatformSource(req.body.platformSource);
     const customTitle = req.body.customTitle || undefined;
+    const prov = getRequestProvenance(req);
+    const llmSource = req.body.llm_source || prov.llmSource || '';
 
     logger.info('HTTP', 'SessionRoutes: handleSessionInitByClaudeId called', {
       contentSessionId,
       project,
       platformSource,
       prompt_length: prompt?.length,
-      customTitle
+      customTitle,
+      llmSource: llmSource || undefined
     });
 
     // Validate required parameters
@@ -805,14 +852,37 @@ export class SessionRoutes extends BaseRouteHandler {
       return;
     }
 
-    // Step 5: Save cleaned user prompt
-    store.saveUserPrompt(contentSessionId, promptNumber, cleanedPrompt);
+    // Step 5: Save cleaned user prompt with originating node from proxy header
+    store.saveUserPrompt(contentSessionId, promptNumber, cleanedPrompt, prov.node || undefined, platformSource || undefined, prov.instance || undefined, llmSource || undefined);
 
-    // Step 6: Check if SDK agent is already running for this session (#1079)
-    // If contextInjected is true, the hook should skip re-initializing the SDK agent
+    // Step 6: Initialize or get existing session with origin node from proxy header
+    // Check BEFORE initialization — contextInjected=true only if session already existed
     const contextInjected = this.sessionManager.getSession(sessionDbId) !== undefined;
+    const activeSession = this.sessionManager.getSession(sessionDbId)
+      || this.sessionManager.initializeSession(sessionDbId, cleanedPrompt, promptNumber, prov.node || undefined);
 
-    // Debug-level log since CREATED already logged the key info
+    // Set provenance from originating client (proxy headers override local identity)
+    if (prov.node) activeSession.node = prov.node;
+    if (llmSource) activeSession.llm_source = llmSource;
+
+    // Broadcast new prompt to SSE clients (for web UI live updates)
+    const latestPrompt = store.getLatestUserPrompt(contentSessionId);
+    if (latestPrompt) {
+      this.eventBroadcaster.broadcastNewPrompt({
+        id: latestPrompt.id,
+        content_session_id: latestPrompt.content_session_id,
+        project: latestPrompt.project,
+        platform_source: latestPrompt.platform_source,
+        prompt_number: latestPrompt.prompt_number,
+        prompt_text: latestPrompt.prompt_text,
+        created_at_epoch: latestPrompt.created_at_epoch,
+        node: latestPrompt.node ?? null,
+        platform: latestPrompt.platform ?? null,
+        instance: latestPrompt.instance ?? null,
+        llm_source: latestPrompt.llm_source ?? null
+      });
+    }
+
     logger.debug('SESSION', 'User prompt saved', {
       sessionId: sessionDbId,
       promptNumber,

@@ -34,6 +34,20 @@ function resolveCreateSessionArgs(
 export class SessionStore {
   public db: Database;
 
+  // Origin tracking — set by the worker when processing requests
+  _currentNode: string | null = null;
+  _currentPlatform: string | null = null;
+  _currentInstance: string | null = null;
+  _currentLlmSource: string | null = null;
+
+  /** Set provenance for user prompts (called once at worker startup) */
+  setLocalProvenance(node: string, platform: string, instance: string, llmSource?: string): void {
+    this._currentNode = node;
+    this._currentPlatform = platform;
+    this._currentInstance = instance;
+    this._currentLlmSource = llmSource ?? null;
+  }
+
   constructor(dbPath: string = DB_PATH) {
     if (dbPath !== ':memory:') {
       ensureDir(DATA_DIR);
@@ -65,6 +79,8 @@ export class SessionStore {
     this.addSessionCustomTitleColumn();
     this.addSessionPlatformSourceColumn();
     this.addObservationModelColumns();
+    this.addObservationProvenanceColumns();
+    this.addSummaryProvenanceColumns();
   }
 
   /**
@@ -697,6 +713,23 @@ export class SessionStore {
       // Clean up leftover temp table from a previously-crashed run
       this.db.run('DROP TABLE IF EXISTS observations_new');
 
+      // Detect provenance columns added by later migrations to preserve them
+      const obsColSet = new Set(
+        (this.db.prepare('PRAGMA table_info(observations)').all() as { name: string }[]).map(c => c.name)
+      );
+      const obsExtraDefs: string[] = [];
+      const obsExtraCols: string[] = [];
+      if (obsColSet.has('content_hash')) { obsExtraDefs.push('content_hash TEXT'); obsExtraCols.push('content_hash'); }
+      if (obsColSet.has('node')) { obsExtraDefs.push('node TEXT'); obsExtraCols.push('node'); }
+      if (obsColSet.has('platform')) { obsExtraDefs.push('platform TEXT'); obsExtraCols.push('platform'); }
+      if (obsColSet.has('instance')) { obsExtraDefs.push('instance TEXT'); obsExtraCols.push('instance'); }
+      if (obsColSet.has('llm_source')) { obsExtraDefs.push('llm_source TEXT'); obsExtraCols.push('llm_source'); }
+      if (obsColSet.has('generated_by_model')) { obsExtraDefs.push('generated_by_model TEXT'); obsExtraCols.push('generated_by_model'); }
+      if (obsColSet.has('relevance_count')) { obsExtraDefs.push('relevance_count INTEGER DEFAULT 0'); obsExtraCols.push('relevance_count'); }
+      const obsExtraSQL = obsExtraDefs.length > 0 ? `,\n          ${obsExtraDefs.join(',\n          ')}` : '';
+      const obsBaseCols = 'id, memory_session_id, project, text, type, title, subtitle, facts, narrative, concepts, files_read, files_modified, prompt_number, discovery_tokens, created_at, created_at_epoch';
+      const obsAllCols = obsExtraCols.length > 0 ? `${obsBaseCols}, ${obsExtraCols.join(', ')}` : obsBaseCols;
+
       this.db.run(`
         CREATE TABLE observations_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -714,16 +747,14 @@ export class SessionStore {
           prompt_number INTEGER,
           discovery_tokens INTEGER DEFAULT 0,
           created_at TEXT NOT NULL,
-          created_at_epoch INTEGER NOT NULL,
+          created_at_epoch INTEGER NOT NULL${obsExtraSQL},
           FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE ON UPDATE CASCADE
         )
       `);
 
       this.db.run(`
         INSERT INTO observations_new
-        SELECT id, memory_session_id, project, text, type, title, subtitle, facts,
-               narrative, concepts, files_read, files_modified, prompt_number,
-               discovery_tokens, created_at, created_at_epoch
+        SELECT ${obsAllCols}
         FROM observations
       `);
 
@@ -769,6 +800,20 @@ export class SessionStore {
       // Clean up leftover temp table from a previously-crashed run
       this.db.run('DROP TABLE IF EXISTS session_summaries_new');
 
+      // Detect provenance columns on session_summaries to preserve them
+      const sumColSet = new Set(
+        (this.db.prepare('PRAGMA table_info(session_summaries)').all() as { name: string }[]).map(c => c.name)
+      );
+      const sumExtraDefs: string[] = [];
+      const sumExtraCols: string[] = [];
+      if (sumColSet.has('node')) { sumExtraDefs.push('node TEXT'); sumExtraCols.push('node'); }
+      if (sumColSet.has('platform')) { sumExtraDefs.push('platform TEXT'); sumExtraCols.push('platform'); }
+      if (sumColSet.has('instance')) { sumExtraDefs.push('instance TEXT'); sumExtraCols.push('instance'); }
+      if (sumColSet.has('llm_source')) { sumExtraDefs.push('llm_source TEXT'); sumExtraCols.push('llm_source'); }
+      const sumExtraSQL = sumExtraDefs.length > 0 ? `,\n          ${sumExtraDefs.join(',\n          ')}` : '';
+      const sumBaseCols = 'id, memory_session_id, project, request, investigated, learned, completed, next_steps, files_read, files_edited, notes, prompt_number, discovery_tokens, created_at, created_at_epoch';
+      const sumAllCols = sumExtraCols.length > 0 ? `${sumBaseCols}, ${sumExtraCols.join(', ')}` : sumBaseCols;
+
       this.db.run(`
         CREATE TABLE session_summaries_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -785,16 +830,14 @@ export class SessionStore {
           prompt_number INTEGER,
           discovery_tokens INTEGER DEFAULT 0,
           created_at TEXT NOT NULL,
-          created_at_epoch INTEGER NOT NULL,
+          created_at_epoch INTEGER NOT NULL${sumExtraSQL},
           FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE ON UPDATE CASCADE
         )
       `);
 
       this.db.run(`
         INSERT INTO session_summaries_new
-        SELECT id, memory_session_id, project, request, investigated, learned,
-               completed, next_steps, files_read, files_edited, notes,
-               prompt_number, discovery_tokens, created_at, created_at_epoch
+        SELECT ${sumAllCols}
         FROM session_summaries
       `);
 
@@ -942,6 +985,65 @@ export class SessionStore {
     }
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(26, new Date().toISOString());
+  }
+
+  /**
+   * Add node, platform, instance columns to observations for multi-machine provenance (migration 27)
+   */
+  private addObservationProvenanceColumns(): void {
+    // Always verify columns exist even if schema_versions says applied —
+    // guards against partial migrations that recorded version but failed mid-ALTER.
+    const alreadyRecorded = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(27) as SchemaVersion | undefined;
+
+    // Add provenance columns to each content table explicitly (no dynamic SQL interpolation)
+    const provenanceTables = [
+      { name: 'observations', pragma: 'PRAGMA table_info(observations)' },
+      { name: 'sdk_sessions', pragma: 'PRAGMA table_info(sdk_sessions)' },
+      { name: 'user_prompts', pragma: 'PRAGMA table_info(user_prompts)' },
+    ] as const;
+    const provenanceCols = ['node', 'platform', 'instance', 'llm_source'] as const;
+
+    for (const { name, pragma } of provenanceTables) {
+      const tableInfo = this.db.query(pragma).all() as TableColumnInfo[];
+      const cols = new Set(tableInfo.map(c => c.name));
+      for (const col of provenanceCols) {
+        if (!cols.has(col)) {
+          // Each ALTER TABLE uses a static table name — safe from injection
+          if (name === 'observations') this.db.run(`ALTER TABLE observations ADD COLUMN ${col} TEXT`);
+          else if (name === 'sdk_sessions') this.db.run(`ALTER TABLE sdk_sessions ADD COLUMN ${col} TEXT`);
+          else if (name === 'user_prompts') this.db.run(`ALTER TABLE user_prompts ADD COLUMN ${col} TEXT`);
+        }
+      }
+    }
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_observations_node ON observations(node)');
+
+    if (!alreadyRecorded) {
+      logger.debug('DB', 'Added node/platform/instance/llm_source origin tracking to observations, sdk_sessions, user_prompts');
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(27, new Date().toISOString());
+    }
+  }
+
+  /**
+   * Add node, platform, instance columns to session_summaries for multi-node origin tracking (migration 28)
+   */
+  private addSummaryProvenanceColumns(): void {
+    // Always verify columns exist even if schema_versions says applied —
+    // guards against partial migrations that recorded version but failed mid-ALTER.
+    const alreadyRecorded = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(28) as SchemaVersion | undefined;
+
+    const tableInfo = this.db.query('PRAGMA table_info(session_summaries)').all() as TableColumnInfo[];
+    const cols = new Set(tableInfo.map(c => c.name));
+
+    for (const col of ['node', 'platform', 'instance', 'llm_source'] as const) {
+      if (!cols.has(col)) {
+        this.db.run(`ALTER TABLE session_summaries ADD COLUMN ${col} TEXT`);
+      }
+    }
+
+    if (!alreadyRecorded) {
+      logger.debug('DB', 'Added node, platform, instance, llm_source columns to session_summaries table');
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
+    }
   }
 
   /**
@@ -1267,6 +1369,10 @@ export class SessionStore {
     prompt_number: number;
     prompt_text: string;
     created_at_epoch: number;
+    node?: string | null;
+    platform?: string | null;
+    instance?: string | null;
+    llm_source?: string | null;
   } | undefined {
     const stmt = this.db.prepare(`
       SELECT
@@ -1654,17 +1760,18 @@ export class SessionStore {
   /**
    * Save a user prompt
    */
-  saveUserPrompt(contentSessionId: string, promptNumber: number, promptText: string): number {
+  saveUserPrompt(contentSessionId: string, promptNumber: number, promptText: string, originNode?: string, originPlatform?: string, originInstance?: string, originLlmSource?: string): number {
     const now = new Date();
     const nowEpoch = now.getTime();
 
     const stmt = this.db.prepare(`
       INSERT INTO user_prompts
-      (content_session_id, prompt_number, prompt_text, created_at, created_at_epoch)
-      VALUES (?, ?, ?, ?, ?)
+      (content_session_id, prompt_number, prompt_text, created_at, created_at_epoch, node, platform, instance, llm_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const result = stmt.run(contentSessionId, promptNumber, promptText, now.toISOString(), nowEpoch);
+    const result = stmt.run(contentSessionId, promptNumber, promptText, now.toISOString(), nowEpoch,
+      originNode || (this._currentNode ?? null), originPlatform || (this._currentPlatform ?? null), originInstance || (this._currentInstance ?? null), originLlmSource || (this._currentLlmSource ?? null));
     return result.lastInsertRowid as number;
   }
 
@@ -1705,7 +1812,11 @@ export class SessionStore {
     promptNumber?: number,
     discoveryTokens: number = 0,
     overrideTimestampEpoch?: number,
-    generatedByModel?: string
+    generatedByModel?: string,
+    node?: string,
+    platform?: string,
+    instance?: string,
+    llmSource?: string
   ): { id: number; createdAtEpoch: number } {
     // Use override timestamp if provided (for processing backlog messages with original timestamps)
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
@@ -1713,7 +1824,7 @@ export class SessionStore {
 
     // Content-hash deduplication
     const contentHash = computeObservationContentHash(memorySessionId, observation.title, observation.narrative);
-    const existing = findDuplicateObservation(this.db, contentHash, timestampEpoch);
+    const existing = findDuplicateObservation(this.db, contentHash, timestampEpoch, node);
     if (existing) {
       return { id: existing.id, createdAtEpoch: existing.created_at_epoch };
     }
@@ -1722,8 +1833,8 @@ export class SessionStore {
       INSERT INTO observations
       (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
        files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
-       generated_by_model)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       generated_by_model, node, platform, instance, llm_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -1742,7 +1853,11 @@ export class SessionStore {
       contentHash,
       timestampIso,
       timestampEpoch,
-      generatedByModel || null
+      generatedByModel || null,
+      node || null,
+      platform || null,
+      instance || null,
+      llmSource || null
     );
 
     return {
@@ -1768,7 +1883,11 @@ export class SessionStore {
     },
     promptNumber?: number,
     discoveryTokens: number = 0,
-    overrideTimestampEpoch?: number
+    overrideTimestampEpoch?: number,
+    node?: string,
+    platform?: string,
+    instance?: string,
+    llmSource?: string
   ): { id: number; createdAtEpoch: number } {
     // Use override timestamp if provided (for processing backlog messages with original timestamps)
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
@@ -1777,8 +1896,9 @@ export class SessionStore {
     const stmt = this.db.prepare(`
       INSERT INTO session_summaries
       (memory_session_id, project, request, investigated, learned, completed,
-       next_steps, notes, prompt_number, discovery_tokens, created_at, created_at_epoch)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       next_steps, notes, prompt_number, discovery_tokens, created_at, created_at_epoch,
+       node, platform, instance, llm_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -1793,7 +1913,11 @@ export class SessionStore {
       promptNumber || null,
       discoveryTokens,
       timestampIso,
-      timestampEpoch
+      timestampEpoch,
+      node ?? null,
+      platform ?? null,
+      instance ?? null,
+      llmSource ?? null
     );
 
     return {
@@ -1816,6 +1940,9 @@ export class SessionStore {
    * @param promptNumber - Optional prompt number
    * @param discoveryTokens - Discovery tokens count
    * @param overrideTimestampEpoch - Optional override timestamp
+   * @param node - Optional node name (multi-machine provenance)
+   * @param platform - Optional platform (darwin/win32/linux)
+   * @param instance - Optional instance name
    * @returns Object with observation IDs, optional summary ID, and timestamp
    */
   storeObservations(
@@ -1842,7 +1969,11 @@ export class SessionStore {
     promptNumber?: number,
     discoveryTokens: number = 0,
     overrideTimestampEpoch?: number,
-    generatedByModel?: string
+    generatedByModel?: string,
+    node?: string,
+    platform?: string,
+    instance?: string,
+    llmSource?: string
   ): { observationIds: number[]; summaryId: number | null; createdAtEpoch: number } {
     // Use override timestamp if provided
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
@@ -1857,14 +1988,14 @@ export class SessionStore {
         INSERT INTO observations
         (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
          files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
-         generated_by_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         generated_by_model, node, platform, instance, llm_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const observation of observations) {
         // Content-hash deduplication (same logic as storeObservation singular)
         const contentHash = computeObservationContentHash(memorySessionId, observation.title, observation.narrative);
-        const existing = findDuplicateObservation(this.db, contentHash, timestampEpoch);
+        const existing = findDuplicateObservation(this.db, contentHash, timestampEpoch, node);
         if (existing) {
           observationIds.push(existing.id);
           continue;
@@ -1886,7 +2017,11 @@ export class SessionStore {
           contentHash,
           timestampIso,
           timestampEpoch,
-          generatedByModel || null
+          generatedByModel || null,
+          node ?? null,
+          platform ?? null,
+          instance ?? null,
+          llmSource ?? null
         );
         observationIds.push(Number(result.lastInsertRowid));
       }
@@ -1897,8 +2032,9 @@ export class SessionStore {
         const summaryStmt = this.db.prepare(`
           INSERT INTO session_summaries
           (memory_session_id, project, request, investigated, learned, completed,
-           next_steps, notes, prompt_number, discovery_tokens, created_at, created_at_epoch)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           next_steps, notes, prompt_number, discovery_tokens, created_at, created_at_epoch,
+           node, platform, instance, llm_source)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const result = summaryStmt.run(
@@ -1913,7 +2049,11 @@ export class SessionStore {
           promptNumber || null,
           discoveryTokens,
           timestampIso,
-          timestampEpoch
+          timestampEpoch,
+          node ?? null,
+          platform ?? null,
+          instance ?? null,
+          llmSource ?? null
         );
         summaryId = Number(result.lastInsertRowid);
       }
@@ -1974,7 +2114,11 @@ export class SessionStore {
     promptNumber?: number,
     discoveryTokens: number = 0,
     overrideTimestampEpoch?: number,
-    generatedByModel?: string
+    generatedByModel?: string,
+    node?: string,
+    platform?: string,
+    instance?: string,
+    llmSource?: string
   ): { observationIds: number[]; summaryId?: number; createdAtEpoch: number } {
     // Use override timestamp if provided
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
@@ -1989,14 +2133,14 @@ export class SessionStore {
         INSERT INTO observations
         (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
          files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
-         generated_by_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         generated_by_model, node, platform, instance, llm_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const observation of observations) {
         // Content-hash deduplication (same logic as storeObservation singular)
         const contentHash = computeObservationContentHash(memorySessionId, observation.title, observation.narrative);
-        const existing = findDuplicateObservation(this.db, contentHash, timestampEpoch);
+        const existing = findDuplicateObservation(this.db, contentHash, timestampEpoch, node);
         if (existing) {
           observationIds.push(existing.id);
           continue;
@@ -2018,7 +2162,11 @@ export class SessionStore {
           contentHash,
           timestampIso,
           timestampEpoch,
-          generatedByModel || null
+          generatedByModel || null,
+          node ?? null,
+          platform ?? null,
+          instance ?? null,
+          llmSource ?? null
         );
         observationIds.push(Number(result.lastInsertRowid));
       }
@@ -2029,8 +2177,9 @@ export class SessionStore {
         const summaryStmt = this.db.prepare(`
           INSERT INTO session_summaries
           (memory_session_id, project, request, investigated, learned, completed,
-           next_steps, notes, prompt_number, discovery_tokens, created_at, created_at_epoch)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           next_steps, notes, prompt_number, discovery_tokens, created_at, created_at_epoch,
+           node, platform, instance, llm_source)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const result = summaryStmt.run(
@@ -2045,7 +2194,11 @@ export class SessionStore {
           promptNumber || null,
           discoveryTokens,
           timestampIso,
-          timestampEpoch
+          timestampEpoch,
+          node ?? null,
+          platform ?? null,
+          instance ?? null,
+          llmSource ?? null
         );
         summaryId = Number(result.lastInsertRowid);
       }

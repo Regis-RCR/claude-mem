@@ -16,6 +16,7 @@ import { PendingMessageStore } from '../sqlite/PendingMessageStore.js';
 import { SessionQueueProcessor } from '../queue/SessionQueueProcessor.js';
 import { getProcessBySession, ensureProcessExit } from './ProcessRegistry.js';
 import { getSupervisor } from '../../supervisor/index.js';
+import { getNodeName, getInstanceName, getLlmSource } from '../../shared/node-identity.js';
 
 export class SessionManager {
   private dbManager: DatabaseManager;
@@ -49,7 +50,7 @@ export class SessionManager {
   /**
    * Initialize a new session or return existing one
    */
-  initializeSession(sessionDbId: number, currentUserPrompt?: string, promptNumber?: number): ActiveSession {
+  initializeSession(sessionDbId: number, currentUserPrompt?: string, promptNumber?: number, originNode?: string): ActiveSession {
     logger.debug('SESSION', 'initializeSession called', {
       sessionDbId,
       promptNumber,
@@ -79,6 +80,11 @@ export class SessionManager {
       }
       if (dbSession.platform_source && dbSession.platform_source !== session.platformSource) {
         session.platformSource = dbSession.platform_source;
+      }
+
+      // Update node from originating client (proxy header overrides server identity)
+      if (originNode && session.node !== originNode) {
+        session.node = originNode;
       }
 
       // Update userPrompt for continuation prompts
@@ -161,7 +167,11 @@ export class SessionManager {
       currentProvider: null,  // Will be set when generator starts
       consecutiveRestarts: 0,  // Track consecutive restart attempts to prevent infinite loops
       processingMessageIds: [],  // CLAIM-CONFIRM: Track message IDs for confirmProcessed()
-      lastGeneratorActivity: Date.now()  // Initialize for stale detection (Issue #1099)
+      lastGeneratorActivity: Date.now(),  // Initialize for stale detection (Issue #1099)
+      node: originNode || getNodeName(),
+      platform: 'claude-code',
+      instance: getInstanceName(),
+      llm_source: getLlmSource()
     };
 
     logger.debug('SESSION', 'Creating new session object (memorySessionId cleared to prevent stale resume)', {

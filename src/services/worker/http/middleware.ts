@@ -10,6 +10,8 @@ import cors from 'cors';
 import path from 'path';
 import { getPackageRoot } from '../../../shared/paths.js';
 import { logger } from '../../../utils/logger.js';
+import { createAuthMiddleware } from './auth-middleware.js';
+import { SettingsDefaultsManager } from '../../../shared/SettingsDefaultsManager.js';
 
 /**
  * Create all middleware for the worker service
@@ -42,6 +44,37 @@ export function createMiddleware(
     credentials: false
   }));
 
+  // Serve static files for web UI BEFORE auth — viewer HTML/JS/CSS are public assets.
+  // Only API endpoints and SSE stream require authentication.
+  // Try both cache structure (ui/) and marketplace structure (plugin/ui/).
+  const packageRoot = getPackageRoot();
+  const uiDirCache = path.join(packageRoot, 'ui');
+  const uiDirMarketplace = path.join(packageRoot, 'plugin', 'ui');
+  const staticOptions = { index: 'viewer.html' };
+  middlewares.push(express.static(uiDirCache, staticOptions));
+  middlewares.push(express.static(uiDirMarketplace, staticOptions));
+
+  // Extract provenance from proxy headers ONCE for all downstream handlers.
+  // Avoids scattered header reads in individual route handlers.
+  middlewares.push((req: Request, _res: Response, next: NextFunction) => {
+    const originNode = req.headers['x-claude-mem-node'] as string || '';
+    const originInstance = req.headers['x-claude-mem-instance'] as string || '';
+    const originLlmSource = req.headers['x-claude-mem-llm-source'] as string || '';
+    if (originNode || originInstance || originLlmSource) {
+      (req as any)._provenance = { node: originNode, instance: originInstance, llmSource: originLlmSource };
+    }
+    next();
+  });
+
+  // Auth — require Bearer token on non-localhost requests in server mode
+  const authToken = () => {
+    const settings = SettingsDefaultsManager.loadFromFile(
+      path.join(SettingsDefaultsManager.get('CLAUDE_MEM_DATA_DIR'), 'settings.json')
+    );
+    return settings.CLAUDE_MEM_AUTH_TOKEN || '';
+  };
+  middlewares.push(createAuthMiddleware(authToken));
+
   // HTTP request/response logging
   middlewares.push((req: Request, res: Response, next: NextFunction) => {
     // Skip logging for static assets, health checks, and polling endpoints
@@ -70,12 +103,16 @@ export function createMiddleware(
     next();
   });
 
-  // Serve static files for web UI (viewer-bundle.js, logos, fonts, etc.)
-  const packageRoot = getPackageRoot();
-  const uiDir = path.join(packageRoot, 'plugin', 'ui');
-  middlewares.push(express.static(uiDir));
-
   return middlewares;
+}
+
+/**
+ * Get origin provenance from request (set by provenance middleware).
+ * Returns the originating client's node/instance/llmSource from proxy headers.
+ * Falls back to empty strings if not a proxied request.
+ */
+export function getRequestProvenance(req: Request): { node: string; instance: string; llmSource: string } {
+  return (req as any)._provenance || { node: '', instance: '', llmSource: '' };
 }
 
 /**
