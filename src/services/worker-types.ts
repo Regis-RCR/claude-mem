@@ -198,6 +198,27 @@ export interface DBSession {
   completed_at_epoch: number | null;
 }
 
+export interface SessionListItem {
+  id: number;
+  content_session_id: string;
+  memory_session_id: string | null;
+  project: string;
+  platform_source: string;
+  status: string;
+  user_prompt: string | null;
+  custom_title: string | null;
+  started_at: string;
+  started_at_epoch: number;
+  completed_at: string | null;
+  completed_at_epoch: number | null;
+  observation_count: number;
+  summary_count: number;
+  node: string | null;
+  platform: string | null;
+  instance: string | null;
+  llm_source: string | null;
+}
+
 // ============================================================================
 // SDK Types
 // ============================================================================

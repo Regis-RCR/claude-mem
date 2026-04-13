@@ -36,6 +36,7 @@ export class DataRoutes extends BaseRouteHandler {
   setupRoutes(app: express.Application): void {
     // Pagination endpoints
     app.get('/api/observations', this.handleGetObservations.bind(this));
+    app.get('/api/sessions', this.handleGetSessions.bind(this));
     app.get('/api/summaries', this.handleGetSummaries.bind(this));
     app.get('/api/prompts', this.handleGetPrompts.bind(this));
 
@@ -71,6 +72,15 @@ export class DataRoutes extends BaseRouteHandler {
   private handleGetObservations = this.wrapHandler((req: Request, res: Response): void => {
     const { offset, limit, project, platformSource } = this.parsePaginationParams(req);
     const result = this.paginationHelper.getObservations(offset, limit, project, platformSource);
+    res.json(result);
+  });
+
+  /**
+   * Get paginated sessions
+   */
+  private handleGetSessions = this.wrapHandler((req: Request, res: Response): void => {
+    const { offset, limit, project, platformSource } = this.parsePaginationParams(req);
+    const result = this.paginationHelper.getSessions(offset, limit, project, platformSource);
     res.json(result);
   });
 

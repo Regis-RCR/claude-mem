@@ -9,7 +9,7 @@
 
 import { DatabaseManager } from './DatabaseManager.js';
 import { logger } from '../../utils/logger.js';
-import type { PaginatedResult, Observation, Summary, UserPrompt } from '../worker-types.js';
+import type { PaginatedResult, Observation, Summary, UserPrompt, SessionListItem } from '../worker-types.js';
 
 export class PaginationHelper {
   private dbManager: DatabaseManager;
@@ -235,6 +235,65 @@ export class PaginationHelper {
 
     const stmt = db.prepare(query);
     const results = stmt.all(...params) as UserPrompt[];
+
+    return {
+      items: results.slice(0, limit),
+      hasMore: results.length > limit,
+      offset,
+      limit
+    };
+  }
+
+  /**
+   * Get paginated sessions with observation/summary counts
+   */
+  getSessions(offset: number, limit: number, project?: string, platformSource?: string): PaginatedResult<SessionListItem> {
+    const db = this.dbManager.getSessionStore().db;
+
+    let query = `
+      SELECT
+        s.id,
+        s.content_session_id,
+        s.memory_session_id,
+        s.project,
+        COALESCE(s.platform_source, 'claude') as platform_source,
+        s.status,
+        s.user_prompt,
+        s.custom_title,
+        s.started_at,
+        s.started_at_epoch,
+        s.completed_at,
+        s.completed_at_epoch,
+        (SELECT COUNT(*) FROM observations o WHERE o.memory_session_id = s.memory_session_id) as observation_count,
+        (SELECT COUNT(*) FROM session_summaries ss WHERE ss.memory_session_id = s.memory_session_id) as summary_count,
+        s.node,
+        s.platform,
+        s.instance,
+        s.llm_source
+      FROM sdk_sessions s
+    `;
+    const params: any[] = [];
+    const conditions: string[] = [];
+
+    if (project) {
+      conditions.push('s.project = ?');
+      params.push(project);
+    }
+
+    if (platformSource) {
+      conditions.push(`COALESCE(s.platform_source, 'claude') = ?`);
+      params.push(platformSource);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+
+    query += ' ORDER BY s.started_at_epoch DESC LIMIT ? OFFSET ?';
+    params.push(limit + 1, offset);
+
+    const stmt = db.prepare(query);
+    const results = stmt.all(...params) as SessionListItem[];
 
     return {
       items: results.slice(0, limit),
