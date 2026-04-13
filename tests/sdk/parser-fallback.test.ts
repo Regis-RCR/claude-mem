@@ -91,7 +91,7 @@ This should be treated as unstructured text.
     const results = parseObservations(raw);
     expect(results.length).toBe(1);
     // No real open+close tag pairs → fallback should fire
-    expect(results[0].title).toContain('The model mentioned');
+    expect(results[0].title).toBe('The model mentioned <type> and <title> in its response but never closed them properly.');
     expect(results[0].narrative).toContain('unstructured text');
   });
 });
